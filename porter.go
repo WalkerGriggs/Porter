@@ -46,14 +46,20 @@ type Porter struct {
 	// firstIP is the first IP of the allocated block
 	firstPort int
 
-	// freePorts is the list of ports _we believe_ to be free
+	// freePorts is the list of ports _we know_ to be free
 	freePorts []int
+
+	// pendingPorts is the list of ports _we believe_ to be free
+	pendingPorts []int
 
 	// ln is used to reserve the port block on the host
 	ln net.Listener
 
 	// mu is used to force synchronous edits on the port lists
 	mu sync.Mutex
+
+	// stopCh is used to stop the pending port checker
+	stopCh chan struct{}
 }
 
 // New creates a new Porter object. It returns an error if porter is unable to
@@ -62,7 +68,9 @@ func New(config *Config) (*Porter, error) {
 	p := &Porter{
 		config:             config,
 		freePorts:          make([]int, 0),
+		pendingPorts:       make([]int, 0),
 		effectiveMaxBlocks: config.MaxBlocks,
+		stopCh:             make(chan struct{}),
 	}
 
 	if err := p.adjustMaxBlocks(); err != nil {
@@ -166,9 +174,50 @@ func (p *Porter) MustTake(n int) (ports []int) {
 	return ports
 }
 
+func (p *Porter) Return(ports []int) {
+	if len(ports) == 0 {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, port := range ports {
+		if port > p.firstPort && port < p.firstPort*p.config.BlockSize {
+			p.pendingPorts = append(p.pendingPorts, port)
+		}
+	}
+}
+
+func (p *Porter) checkFreedPorts() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i, port := range p.pendingPorts {
+		if used := IsPortInUse(port); !used {
+			p.freePorts = append(p.freePorts, port)
+			p.pendingPorts = append(p.pendingPorts[:i], p.pendingPorts[i+1:]...)
+		}
+	}
+}
+
+func (p *Porter) CheckFreedPorts() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.checkFreedPorts()
+		}
+	}
+}
+
 // Close is used to close the listener that locks the first port of the
 // allocated block.
 func (p *Porter) Close() {
+	defer close(p.stopCh)
+
 	if p.ln != nil {
 		p.ln.Close()
 		p.ln = nil
