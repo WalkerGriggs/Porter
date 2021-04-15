@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"runtime"
 )
 
 // DefaultConfig is used to set reasonable config defaults.
@@ -33,6 +34,9 @@ type Config struct {
 
 	// LowerBound is used to configure the lowest port Porter will allocate.
 	LowerBound int
+
+	// OS is used to override the ephemeral port range commands. Defaults to GOOS
+	OS string
 }
 
 // Porter is used to track free ports.
@@ -120,7 +124,7 @@ func (p *Porter) alloc() error {
 // adjustMaxBlocks checks for block overlap with the ephemeral port range. If
 // there is overlap, cut the MaxBlocks short.
 func (p *Porter) adjustMaxBlocks() error {
-	ephemeralMin, ephemeralMax, err := ephemeralPortRange()
+	ephemeralMin, ephemeralMax, err := p.ephemeralPortRange()
 	if err != nil {
 		return err
 	}
@@ -229,14 +233,58 @@ func TCPAddr(ip string, port int) *net.TCPAddr {
 	return &net.TCPAddr{IP: net.ParseIP(ip), Port: port}
 }
 
+func (p *Porter) ephemeralPortRange() (int, int, error) {
+	os := runtime.GOOS
+	if p.config.OS != "" {
+		os = p.config.OS
+	}
+
+	switch os {
+	case "darwin":
+		return darwinEmphemeralPortRange()
+
+	case "linux":
+		return linuxEphemeralPortRange()
+
+	default:
+		return 0, 0, fmt.Errorf("Supported OS %s", os)
+	}
+}
+
 // ephemeralPortRange is used to get the host systems's ephemeral port range.
 // This function is a bit of hack, and needs to be expanded to support Darwin
 // and Windows.
-func ephemeralPortRange() (int, int, error) {
+func linuxEphemeralPortRange() (int, int, error) {
 	key := "net.ipv4.ip_local_port_range"
 	pattern := regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s*$`)
 
 	cmd := exec.Command("sysctl", "-n", key)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	val := string(out)
+
+	m := pattern.FindStringSubmatch(val)
+	if m != nil {
+		min, err1 := strconv.Atoi(m[1])
+		max, err2 := strconv.Atoi(m[2])
+
+		if err1 == nil && err2 == nil {
+			return min, max, nil
+		}
+	}
+
+	return 0, 0, fmt.Errorf("Unexpected sysctl value %q.", val)
+}
+
+func darwinEmphemeralPortRange() (int, int, error) {
+	firstKey := "net.inet.ip.portrange.first"
+	lastKey := "net.inet.ip.portrange.last"
+	pattern := regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s*$`)
+
+	cmd := exec.Command("sysctl", "-n", firstKey, lastKey)
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, 0, err
