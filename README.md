@@ -1,4 +1,4 @@
-# Porter
+# Porter [![Go Reference](https://pkg.go.dev/badge/github.com/walkergriggs/porter.svg)](https://pkg.go.dev/github.com/walkergriggs/porter)
 A simple package for allocating free ports adapted from [Consul's freeport](https://github.com/hashicorp/consul/tree/master/sdk/freeport).
 
 ## Installation
